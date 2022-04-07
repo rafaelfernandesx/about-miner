@@ -1,7 +1,6 @@
 <?php
 
 require_once './FetchClass.php';
-require_once './test_phpminer.php';
 
 class BTCMiner
 {
@@ -9,52 +8,58 @@ class BTCMiner
     private $RPC_PORT = "8332";
     private $RPC_USER = "rafael";
     private $RPC_PASS = "961961961";
-    private $startNonce;
+    private $currentNonce;
+    private $jumpNonce;
+    private $time;
+	private $extraNonce;
+    private $pathConf;
+    private $blockTemplate;
 
-    private $bt;
 
-
-    function __construct($startNonce)
+    function __construct(int $currentNonce = 0, int $jumpNonce = 1, int $time = 0, int $extraNonce = 0, $pathConf = 'conf.json')
     {
-        global $block_vector;
-        $this->bt = $block_vector;
-        $this->startNonce = $startNonce ?? 0;
+        $this->currentNonce = $currentNonce;
+        $this->jumpNonce = $jumpNonce;
+        $this->time = $time;
+		$this->extraNonce = $extraNonce;
+		$this->pathConf = $pathConf;
     }
 
-    public function saveBlock($block, $mined = null) {
-        $filename = "block.json";
-        if ($mined) {
-            $filename = "mined.txt";
+    static public function loadConf($pathConf): array
+    {
+        $conf = file_get_contents($pathConf);
+        if (empty($conf)) {
+            throw new Exception('Arquivo de configuração inválido!');
         }
-        $file = fopen($filename, "w");
-        fwrite($file, $block);
-        // fclose($file);
+        return json_decode($conf, true);
     }
 
-    public function saveHash($hash) {
-        $filename = "hashs.json";
-
-        $file = fopen($filename, "a");
-        fwrite($file, $hash."\n");
-        fclose($file);
-    }
-
-    public function readBlock() {
-        $filename = "block.json";
-        $file = fopen($filename, "r") or die("Erro ao ler arquivo!");
-        return fread($file, filesize($filename));
+    public function saveConf(): void
+    {
+        $conf = [
+            'currentNonce' => $this->currentNonce,
+            'jumpNonce' => $this->jumpNonce,
+            'time' => $this->time,
+            'extraNonce' => $this->extraNonce,
+            'pathConf' => $this->pathConf
+        ];
+        file_put_contents($this->pathConf, json_encode($conf));
     }
 
     ################################################################################
     # Bitcoin Daemon JSON-HTTP RPC
     ################################################################################
 
-    private function rpc($method, $params = null)
+    private function rpc(string $method, array $params = null): array
     {
         $data = json_encode(['id' => 'json', 'method' => $method, "params" => $params]);
 
-        $response = (new Fetch_url($this->RPC_URL, $data, $this->RPC_PORT, array($this->RPC_USER, $this->RPC_PASS)))->source;
+        $response = new Fetch_url($this->RPC_URL, $data, $this->RPC_PORT, array($this->RPC_USER, $this->RPC_PASS));
+        $response = $response->source;
         $response = json_decode($response, true);
+        // echo '<pre>';
+        // print_r($response['result']);
+        // exit;
         return $response['result'];
     }
 
@@ -62,17 +67,9 @@ class BTCMiner
     # Bitcoin Daemon RPC Call Wrappers
     ################################################################################
 
-    public function rpc_getblocktemplate()
+    public function rpc_getblocktemplate(): array
     {
-        $savedBlock = $this->readBlock();
-        if (strlen($savedBlock) > 0) {
-            return json_decode($savedBlock, true);
-        }
-        $block_template = $this->rpc("getblocktemplate", [["rules" => ["segwit"]]]);
-
-        $this->saveBlock(json_encode($block_template));
-
-        return $block_template;
+        return $this->rpc("getblocktemplate", [["rules" => ["segwit"]]]);
     }
 
     public function rpc_submitblock($block_submission)
@@ -113,7 +110,7 @@ class BTCMiner
         $b3 = $n % 256;
         $b2 = $n / 256;
         $b1 = $b2 / 256;
-        $b2 = $b2 % 256;
+        @$b2 = $b2 % 256; //Deprecated: Implicit conversion from float 2808.94921875 to int loses precision in C:\Users\Rafael\Desktop\phpminer\index.php on line 83
         return pack('CCC', $b3, $b2, $b1);
     }
 
@@ -351,9 +348,11 @@ class BTCMiner
 
         $header = strrev(
             hex2bin(
-                hash('sha256',
+                hash(
+                    'sha256',
                     hex2bin(
-                        hash('sha256',
+                        hash(
+                            'sha256',
                             $header
                         )
                     )
@@ -365,6 +364,7 @@ class BTCMiner
 
     public function block_bits2target($bits)
     {
+
         $bits = hex2bin($bits);
         $shift = hexdec(bin2hex($bits[0])) - 3;
         $value = substr($bits, 1);
@@ -440,46 +440,42 @@ class BTCMiner
             # Reform the block header
             $block_header = $this->block_make_header($block_template);
 
-            $time_stamp = microtime(true);
-
             # Loop through the nonce
-            $nonce = !empty($debugnonce_start) ? $debugnonce_start : 0;
+            $nonce = $debugnonce_start ?? 0;
 
-            while ($nonce <= 9994967295) {
+            while ($nonce <= 4294967295) {
 
                 # Update the block header with the new 32-bit nonce
                 $block_header = substr($block_header, 0, -4) . pack('V', $nonce);
 
                 # Recompute the block hash
                 $block_hash = $this->block_compute_raw_hash($block_header);
-                // $this->saveHash(bin2hex($block_hash));
+                $hash_rate_count++;
+
                 # Check if it the block meets the target hash
                 if ($block_hash < $target_hash) {
                     $block_template['nonce'] = $nonce;
                     $block_template['hash'] = bin2hex($block_hash);
-                    return [$block_template, $hash_rate, $nonce];
+                    return [$block_template, $hash_rate, $nonce, $extranonce];
                 }
 
                 # Measure hash rate and check timeout
-                if ($nonce > 0 && $nonce % 1048576 == 0) {
-                    $hash_rate = $hash_rate + ((1048576 / (microtime(true) - $time_stamp)) - $hash_rate) / ($hash_rate_count + 1);
-                    $hash_rate_count += 1;
-
-                    $time_stamp = microtime(true);
-
-                    # If our mine time expired, return none
-                    if ($timeout and ($time_stamp - $time_start) > $timeout) {
-                        return [null, $hash_rate, $nonce];
-                    }
+                $time_stamp = microtime(true);
+                if ($timeout and ($time_stamp - $time_start) > $timeout) {
+                    $hash_rate = $hash_rate_count / $timeout;
+                    return [null, $hash_rate, $nonce, $extranonce];
                 }
 
-                $nonce += 1;
+                $nonce++;
             }
-            $extranonce += 1;
+            $extranonce += $this->jumpNonce;
+            if ($nonce >= 4294967295) {
+                return [null, $hash_rate, 0, $extranonce];
+            }
         }
 
         # If we ran out of extra nonces, return none
-        return [null, $hash_rate, $nonce];
+        return [null, $hash_rate, $nonce, $extranonce];
     }
 
     ################################################################################
@@ -488,46 +484,106 @@ class BTCMiner
 
     public function standalone_miner($coinbase_message, $address)
     {
-        $block_template = $this->rpc_getblocktemplate();
-        $nonceInitial = $this->startNonce;
-        $currentNonce = $nonceInitial;
-        $initialTime = date('Y-m-d H:i:s');
+        // $initialTime = time();
+        if ($this->currentNonce > 0) {
+            $block_template = json_decode(file_get_contents('blocktemplate.json'), true);
+        }else{
+            $block_template = $this->rpc_getblocktemplate();
+            file_put_contents('blocktemplate.json', json_encode($block_template));
+        }
         while (true) {
-            echo 'Mining block template, height ' . $block_template['height'] . " | ";
-            $res = $this->block_mine($block_template, bin2hex($coinbase_message), 0, $address, 5, $currentNonce);
+
+            echo 'Mining block template, height ' . $block_template['height'] . "\n";
+            $res = $this->block_mine($block_template, bin2hex($coinbase_message), $this->extraNonce, $address, $this->time, $this->currentNonce);
             $mined_block = $res[0];
             $hash_rate = $res[1];
-            $currentNonce = $res[2];
-            echo ($hash_rate / 1000.0) . " KH/s | Nonce " . $currentNonce . "\n";
-
+            $this->currentNonce = $res[2];
+            $this->extraNonce = $res[3];
+            echo ($hash_rate / 1000.0) . " KH/s \n";
+            echo $this->extraNonce . " extra Nonce \n";
+            echo $this->currentNonce . " nonce \n\n";
+            $this->saveConf();
             if ($mined_block) {
+                file_put_contents('mineInfo.json', json_encode([$this->extraNonce, $this->currentNonce]));
+                file_put_contents('blocktemplateMined' . $this->currentNonce . '.json', json_encode($block_template));
                 echo "Solved a block! Block hash: " . $mined_block['hash'] . "\n";
-                $this->saveBlock($mined_block, 'mined');
-                // $submission = $this->block_make_submit($mined_block);
+                $submission = $this->block_make_submit($mined_block);
                 //     echo "\n";
                 //    print_r($submission);
-                # print("Submitting:", submission, "\n")
-                // $response = $this->rpc_submitblock($submission);
-                // print_r($response);
+                echo "Submitting:", $submission, "\n";
+                $response = $this->rpc_submitblock($submission);
+                print_r($response);
+                exit;
                 # if response is not None:
                 #     print("Submission Error: {}".format(response))
                 #     break
-                exit;
-            }
-            if ($currentNonce > ($nonceInitial + 1000000000)) {
-                $finalTime = date('Y-m-d H:i:s');
-                echo "iniciou em: $initialTime, finalizado em $finalTime, currentNonce $currentNonce";
-                exit;
             }
         }
     }
 }
+$time = 30;
+$jumpNonce = 1;
+$currentNonce = 0;
+$extraNonce = 0;
+$pathConf = '';
+
+foreach ($argv as $key => $value) {
+    switch ($value) {
+        case '-t':
+            if (!empty($argv[$key+1])) {
+                $time = $argv[$key+1] ?? 0;
+            }
+            break;
+        case '-j':
+            if (!empty($argv[$key+1])) {
+                $jumpNonce = $argv[$key+1];
+            }
+            break;
+        case '-n':
+            if (!empty($argv[$key+1])) {
+                $currentNonce = $argv[$key+1] ?? 0;
+            }
+            break;
+        case '-e':
+            if (!empty($argv[$key+1])) {
+                $extraNonce = $argv[$key+1] ?? 0;
+            }
+            break;
+        case '-l':
+            if (!empty($argv[$key+1])) {
+                $pathConf = $argv[$key+1] ?? 0;
+                $conf = BTCMiner::loadConf($pathConf);
+                $time = $conf['time'];
+                $jumpNonce = $conf['jumpNonce'];
+                $currentNonce = $conf['currentNonce'];
+                $extraNonce = $conf['extraNonce'];
+                $pathConf = $conf['pathConf'];
+            }
+            break;
+        case '-s':
+            if (!empty($argv[$key+1])) {
+                $pathConf = $argv[$key+1] ?? 'conf.json';
+            }
+            break;
+    }
+}
 
 
-$bm = new BTCMiner($argv[1] ?? 0);
+$bm = new BTCMiner($currentNonce, $jumpNonce, $time, $extraNonce, $pathConf);
 
-// print_r($bm->readBlock());
 
-$bm->standalone_miner('Hello from vsergeev', '1QB79A754AaKfXwynBEJe6NTrnGrdWHUNF');
+$bm->standalone_miner('Sua mensagem', '3Nzsu78TyKJ5njB2sqeTpDVNwPUheYvnxm');
 
 exit;
+
+
+/**
+ * -t tempo de atualização dos dados sobre a mineração
+ * -j incremento do nonce extra
+ * -n nonce inicial
+ * -e nonce extra inicial
+ * -l path para carregar configuração
+ * -s path para salvar configuração
+ * ex: php index.php -t 10 -n 0 -j 0 -e 0 -s file1.json ou -l file1.json
+ * ex: php index.php -l file1.json
+ */

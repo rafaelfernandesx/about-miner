@@ -7,7 +7,6 @@ class Fetch_url
 
     function __construct($url, $posts = null, $port = null, $auth = null)
     {
-        // nollstÃ¤ller header
         $this->header = '';
         $this->error = '';
 
